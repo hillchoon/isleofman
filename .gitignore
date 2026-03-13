@@ -1,0 +1,24 @@
+# Virtual env
+.venv/
+venv/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Secrets & env
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
