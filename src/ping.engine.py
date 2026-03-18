@@ -32,15 +32,9 @@ from icmplib.exceptions import (
 # Configuration (will later be read from config.json)
 # ---------------------------------------------------------------------------
 
-TARGETS = [
-    {"host": "8.8.8.8",   "label": "Google DNS"},
-    {"host": "1.1.1.1",   "label": "Cloudflare DNS"},
-    {"host": "10.255.255.1",   "label": "Google DNS 2"},
-]
-
 PING_INTERVAL = 0.5      # seconds between each full ping cycle
 PING_TIMEOUT  = 2      # seconds to wait for a reply per packet
-PING_PAYLOAD  = 56     # bytes of ICMP payload (standard default)
+PING_PAYLOAD  = 0      # bytes of ICMP payload (0 = header only)
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +110,8 @@ def ping_once(host: str, label: str, icmp_seq: int) -> dict:
         type           : int   — ICMP type code
         code           : int   — ICMP code
         bytes_received : int   — number of bytes received
-        time           : float — round-trip time in SECONDS
+        time           : float — Unix epoch timestamp in seconds at moment
+                                 of receipt. RTT = reply.time - request.time.
     Note: time_to_live (TTL) is NOT exposed on ICMPReply.
     """
 
@@ -138,10 +133,15 @@ def ping_once(host: str, label: str, icmp_seq: int) -> dict:
 
     timestamp = datetime.now(timezone.utc).isoformat()
 
+    # Unique ICMP id per target derived from PID XOR hash of IP address.
+    # This guarantees no two concurrent sockets share the same id,
+    # preventing cross-matching of replies across concurrent ping threads.
+    icmp_id = (os.getpid() ^ hash(ip_address)) & 0xFFFF
+
     # Build the ICMP echo request — no timeout here
     request = ICMPRequest(
         destination=ip_address,
-        id=os.getpid() & 0xFFFF,
+        id=icmp_id,
         sequence=icmp_seq,
         payload_size=PING_PAYLOAD,
     )
@@ -157,7 +157,9 @@ def ping_once(host: str, label: str, icmp_seq: int) -> dict:
             # if the reply is not a clean Echo Reply
             reply.raise_for_status()
 
-            # reply.time is in seconds — convert to milliseconds
+            # request.time and reply.time are both Unix epoch timestamps
+            # in seconds, set by icmplib at the exact moment of send and
+            # receive respectively. Their difference is the true RTT.
             rtt_ms = round((reply.time - request.time) * 1000, 3)
 
             # bytes_received is the correct property name in icmplib 3.x
@@ -293,6 +295,7 @@ async def ping_target(
 
 
 async def ping_cycle(
+    targets: list,
     seq_counters: dict,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
@@ -307,11 +310,11 @@ async def ping_cycle(
             seq_counters[t["host"]],
             loop,
         )
-        for t in TARGETS
+        for t in targets
     ]
 
     # Advance all sequence counters before awaiting results
-    for t in TARGETS:
+    for t in targets:
         seq_counters[t["host"]] = (seq_counters[t["host"]] + 1) & 0xFFFF
 
     results = await asyncio.gather(*tasks)
@@ -337,14 +340,20 @@ async def run() -> None:
     """
     loop = asyncio.get_event_loop()
 
-    # Initialise per-target sequence counters starting at 0
-    seq_counters = {t["host"]: 0 for t in TARGETS}
-
     print("=" * 70)
-    print(" Ninja Netmon Ping Engine v0.5")
-    print(f" Targets  : {', '.join(t['host'] for t in TARGETS)}")
+    print(" NetMonitor Ping Engine v1.5")
+    print("=" * 70)
+    target_ip = input("\nTarget IP address: ").strip()
+    targets = [{"host": target_ip, "label": target_ip}]
+
+    # Initialise per-target sequence counter starting at 0
+    seq_counters = {target_ip: 0}
+
+    print()
+    print(f" Target   : {target_ip}")
     print(f" Interval : {PING_INTERVAL}s")
     print(f" Timeout  : {PING_TIMEOUT}s per packet")
+    print(f" Payload  : {PING_PAYLOAD} bytes")
     print(f" icmplib  : 3.0.4")
     print("=" * 70)
 
@@ -354,7 +363,7 @@ async def run() -> None:
         cycle_start = time.monotonic()
 
         print(f"\n--- Cycle {cycle} ---")
-        await ping_cycle(seq_counters, loop)
+        await ping_cycle(targets, seq_counters, loop)
 
         elapsed   = time.monotonic() - cycle_start
         sleep_for = max(0.0, PING_INTERVAL - elapsed)
